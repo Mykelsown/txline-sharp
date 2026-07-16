@@ -1,52 +1,82 @@
-package store
+package detector
 
 import (
-	"sync"
+	"math"
+	"time"
 
 	"github.com/Mykelsown/txline-sharp/feed"
 )
 
-// FixtureSnapshot holds the most recent odds snapshot for one fixture.
-type FixtureSnapshot struct {
-	FixtureID int64
-	Odds      feed.OddsSnapshot // outcomeID -> OddsEntry
+// Detector diffs consecutive odds snapshots and emits Signals when a
+// significant implied-probability shift is detected.
+type Detector struct {
+	threshold float64 // minimum absolute prob delta to trigger (e.g. 0.04)
 }
 
-// Memory holds the last known odds snapshot for every tracked fixture.
-// It is safe for concurrent use by the poller and detector goroutines.
-type Memory struct {
-	mu        sync.RWMutex
-	snapshots map[int64]feed.OddsSnapshot // fixtureID -> snapshot
+// New constructs a Detector with the given movement threshold.
+func New(threshold float64) *Detector {
+	return &Detector{threshold: threshold}
 }
 
-// NewMemory constructs an empty Memory store.
-func NewMemory() *Memory {
-	return &Memory{
-		snapshots: make(map[int64]feed.OddsSnapshot),
+// Diff compares a previous odds snapshot against a new one for a single fixture
+// and returns all Signals whose implied-probability shift exceeds the threshold.
+//
+// fixture provides match context (team names) for the signal.
+// prev is the stored snapshot from the last poll cycle.
+// curr is the freshly fetched snapshot.
+func (d *Detector) Diff(
+	fixture feed.Fixture,
+	prev feed.OddsSnapshot,
+	curr feed.OddsSnapshot,
+) []Signal {
+	var signals []Signal
+	now := time.Now().UTC()
+
+	for outcomeID, newEntry := range curr {
+		oldEntry, existed := prev[outcomeID]
+		if !existed {
+			// New outcome appeared in the market. Skip, no baseline to diff.
+			continue
+		}
+
+		probBefore := oldEntry.ImpliedProbability()
+		probAfter := newEntry.ImpliedProbability()
+
+		if probBefore == 0 || probAfter == 0 {
+			continue
+		}
+
+		delta := math.Abs(probAfter - probBefore)
+		if delta < d.threshold {
+			continue
+		}
+
+		direction := "SHORTENING"
+		if probAfter < probBefore {
+			direction = "DRIFTING"
+		}
+
+		sig := Signal{
+			FixtureID:   fixture.FixtureID,
+			HomeTeam:    fixture.HomeTeam(),
+			AwayTeam:    fixture.AwayTeam(),
+			MarketName:  newEntry.MarketName,
+			OutcomeName: newEntry.OutcomeName,
+			OutcomeID:   outcomeID,
+			PriceBefore: oldEntry.Price,
+			PriceAfter:  newEntry.Price,
+			ProbBefore:  probBefore,
+			ProbAfter:   probAfter,
+			ProbDelta:   delta,
+			Severity:    classifySeverity(delta),
+			Direction:   direction,
+			DetectedAt:  now,
+			BlockHash:   newEntry.BlockHash,
+			Resolved:    false,
+		}
+
+		signals = append(signals, sig)
 	}
-}
 
-// Get returns the previous odds snapshot for a fixture, and whether one exists.
-func (m *Memory) Get(fixtureID int64) (feed.OddsSnapshot, bool) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	snap, ok := m.snapshots[fixtureID]
-	return snap, ok
-}
-
-// Set stores the latest odds snapshot for a fixture, replacing any previous one.
-func (m *Memory) Set(fixtureID int64, snap feed.OddsSnapshot) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.snapshots[fixtureID] = snap
-}
-
-// BuildSnapshot converts a flat slice of OddsEntry (from the API) into an
-// OddsSnapshot map keyed by OutcomeID for O(1) diff lookups.
-func BuildSnapshot(entries []feed.OddsEntry) feed.OddsSnapshot {
-	snap := make(feed.OddsSnapshot, len(entries))
-	for _, e := range entries {
-		snap[e.OutcomeID] = e
-	}
-	return snap
+	return signals
 }
