@@ -1,5 +1,7 @@
 package feed
 
+import "time"
+
 // Fixture represents a single match from /api/fixtures/snapshot
 type Fixture struct {
 	FixtureID          int64   `json:"FixtureId"`
@@ -7,12 +9,17 @@ type Fixture struct {
 	Participant1       string  `json:"Participant1"`
 	Participant2       string  `json:"Participant2"`
 	Participant1IsHome bool    `json:"Participant1IsHome"`
-	StartTime          int64   `json:"StartTime"` // Unix timestamp (seconds)
+	StartTimeMs        int64   `json:"StartTime"` // Unix timestamp in milliseconds
 	GameState          int     `json:"GameState"`
 	StatusID           int     `json:"StatusId"`
 }
 
-// HomeTeam returns the home team name based on the feed's designation.
+// StartTime returns the fixture start time as a time.Time.
+func (f Fixture) StartTime() time.Time {
+	return time.Unix(f.StartTimeMs/1000, 0).UTC()
+}
+
+// HomeTeam returns the home team name based on the feed designation.
 func (f Fixture) HomeTeam() string {
 	if f.Participant1IsHome {
 		return f.Participant1
@@ -28,6 +35,11 @@ func (f Fixture) AwayTeam() string {
 	return f.Participant1
 }
 
+// IsFootball returns true for FIFA World Cup football fixtures (competition 72).
+func (f Fixture) IsFootball() bool {
+	return f.CompetitionID == 72
+}
+
 // OddsEntry represents a single odds record from /api/odds/snapshot/:fixtureId
 type OddsEntry struct {
 	FixtureID   int64   `json:"FixtureId"`
@@ -41,7 +53,6 @@ type OddsEntry struct {
 }
 
 // ImpliedProbability converts a decimal odds price to implied probability (0.0 to 1.0).
-// Returns 0 if Price is zero or negative to avoid division by zero.
 func (o OddsEntry) ImpliedProbability() float64 {
 	if o.Price <= 0 {
 		return 0
@@ -51,14 +62,14 @@ func (o OddsEntry) ImpliedProbability() float64 {
 
 // ScoreEntry represents a single score record from /api/scores/snapshot/:fixtureId
 type ScoreEntry struct {
-	FixtureID  int64  `json:"FixtureId"`
-	Action     string `json:"Action"`
-	Period     int    `json:"Period"`
-	StatusID   int    `json:"StatusId"`
-	Seq        int64  `json:"Seq"`
-	Timestamp  string `json:"Ts"`
-	GameState  int    `json:"GameState"`
-	Stats      map[string]int `json:"Stats"`
+	FixtureID int64          `json:"FixtureId"`
+	Action    string         `json:"Action"`
+	Period    int            `json:"Period"`
+	StatusID  int            `json:"StatusId"`
+	Seq       int64          `json:"Seq"`
+	Timestamp string         `json:"Ts"`
+	GameState int            `json:"GameState"`
+	Stats     map[string]int `json:"Stats"`
 }
 
 // IsFinished returns true when the match has reached a terminal state.
