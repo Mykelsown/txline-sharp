@@ -5,6 +5,8 @@ import (
 	"log"
 	"os"
 
+	"time"
+
 	"github.com/Mykelsown/txline-sharp/config"
 	"github.com/Mykelsown/txline-sharp/feed"
 )
@@ -47,11 +49,13 @@ func main() {
 		limit = len(fixtures)
 	}
 	for i, f := range fixtures[:limit] {
-		fmt.Printf("  %d. %s vs %s (ID: %d, GameState: %d)\n",
+		kickoff := time.Unix(f.StartTime, 0).UTC().Format("Jan 02 15:04 UTC")
+		fmt.Printf("  %d. %s vs %s (ID: %d, Kickoff: %s, GameState: %d)\n",
 			i+1,
 			f.HomeTeam(),
 			f.AwayTeam(),
 			f.FixtureID,
+			kickoff,
 			f.GameState,
 		)
 	}

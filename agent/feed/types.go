@@ -2,14 +2,14 @@ package feed
 
 // Fixture represents a single match from /api/fixtures/snapshot
 type Fixture struct {
-	FixtureID         int64   `json:"FixtureId"`
-	CompetitionID     int64   `json:"CompetitionId"`
-	Participant1      string  `json:"Participant1"`
-	Participant2      string  `json:"Participant2"`
-	Participant1IsHome bool   `json:"Participant1IsHome"`
-	StartTime         string  `json:"StartTime"`
-	GameState         int     `json:"GameState"`
-	StatusID          int     `json:"StatusId"`
+	FixtureID          int64   `json:"FixtureId"`
+	CompetitionID      int64   `json:"CompetitionId"`
+	Participant1       string  `json:"Participant1"`
+	Participant2       string  `json:"Participant2"`
+	Participant1IsHome bool    `json:"Participant1IsHome"`
+	StartTime          int64   `json:"StartTime"` // Unix timestamp (seconds)
+	GameState          int     `json:"GameState"`
+	StatusID           int     `json:"StatusId"`
 }
 
 // HomeTeam returns the home team name based on the feed's designation.
