@@ -13,9 +13,6 @@ const (
 	BaseURL      = "https://txline.txodds.com"
 	APIBase      = BaseURL + "/api"
 	GuestAuthURL = BaseURL + "/auth/guest/start"
-
-	// WorldCupCompetitionID is the TxLINE competition ID for the 2026 World Cup.
-	WorldCupCompetitionID = 500005
 )
 
 // Client wraps the TxLINE HTTP API with automatic JWT renewal.
@@ -99,9 +96,10 @@ func (c *Client) get(path string) ([]byte, error) {
 	return nil, fmt.Errorf("get %s: exhausted retries", path)
 }
 
-// Fixtures fetches all World Cup fixtures.
+// Fixtures fetches all fixtures in the active subscription bundle.
+// The free World Cup tier returns all covered World Cup fixtures.
 func (c *Client) Fixtures() ([]Fixture, error) {
-	data, err := c.get(fmt.Sprintf("/fixtures/snapshot?competitionId=%d", WorldCupCompetitionID))
+	data, err := c.get("/fixtures/snapshot")
 	if err != nil {
 		return nil, fmt.Errorf("fixtures: %w", err)
 	}
