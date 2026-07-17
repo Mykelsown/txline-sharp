@@ -9,6 +9,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/joho/godotenv"
+
 	"github.com/Mykelsown/txline-sharp/arena"
 	"github.com/Mykelsown/txline-sharp/config"
 	"github.com/Mykelsown/txline-sharp/detector"
@@ -18,6 +20,13 @@ import (
 
 func main() {
 	log.SetFlags(log.Ltime | log.Lshortfile)
+
+	// Load .env file if it exists. Silently ignored if not found,
+	// so environment variables set externally still work.
+	if err := godotenv.Load(); err == nil {
+		log.Println("Loaded .env file")
+	}
+
 	log.Println("TxLINE Sharp Movement Detector + Arena")
 	log.Println("=======================================")
 
@@ -38,12 +47,12 @@ func main() {
 	log.Printf("Signals File:       %s", cfg.SignalsFile)
 	log.Printf("Arena Results:      %s", cfg.ArenaResultsFile)
 
-	// AI interpreter (optional, requires ANTHROPIC_API_KEY env var).
+	// AI interpreter (optional, requires ANTHROPIC_API_KEY in .env or environment).
 	interpreter := arena.NewInterpreter()
 	if interpreter != nil {
 		log.Println("AI Interpreter:     enabled")
 	} else {
-		log.Println("AI Interpreter:     disabled (set ANTHROPIC_API_KEY to enable)")
+		log.Println("AI Interpreter:     disabled (set ANTHROPIC_API_KEY in .env to enable)")
 	}
 	log.Println()
 
@@ -54,20 +63,21 @@ func main() {
 	tracker := store.NewOutcomeTracker(cfg.SignalsFile)
 	engine  := arena.NewEngine(cfg.ArenaResultsFile)
 
-	// Open persist layer.
+	// Open persist layer (creates signals.jsonl if it doesn't exist).
 	persist, err := store.NewPersist(cfg.SignalsFile)
 	if err != nil {
 		log.Fatalf("persist: %v", err)
 	}
 	defer persist.Close()
 
+	// Load any signals logged in previous runs.
 	existing, err := store.LoadAll(cfg.SignalsFile)
 	if err != nil {
 		log.Fatalf("load existing signals: %v", err)
 	}
 	log.Printf("Loaded %d existing signal(s) from previous runs.", len(existing))
 
-	// Fetch football fixtures.
+	// Fetch football fixtures once at startup.
 	log.Println("Fetching World Cup fixtures...")
 	allFixtures, err := client.Fixtures()
 	if err != nil {
@@ -95,7 +105,7 @@ func main() {
 	}
 	fmt.Println()
 
-	// Graceful shutdown.
+	// Graceful shutdown on SIGINT / SIGTERM.
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
@@ -104,6 +114,7 @@ func main() {
 
 	log.Printf("Agent running. Polling every %ds. Press Ctrl+C to stop.", cfg.PollIntervalSec)
 
+	// Run one poll immediately before waiting for the ticker.
 	poll(client, memory, detect, persist, tracker, engine, interpreter, fixtures)
 
 	for {
@@ -122,6 +133,9 @@ func main() {
 	}
 }
 
+// poll fetches fresh odds and scores for every tracked fixture,
+// runs the detector, persists signals, routes them to the arena,
+// and resolves finished matches.
 func poll(
 	client      *feed.Client,
 	memory      *store.Memory,
@@ -156,14 +170,13 @@ func poll(
 				if err := tracker.Resolve(fixture, score); err != nil {
 					log.Printf("outcome resolve error: %v", err)
 				}
-
 				engine.Settle(fixture.FixtureID, result,
 					fixture.HomeTeam(), fixture.AwayTeam(), finalScore)
 				break
 			}
 		}
 
-		// Fetch odds.
+		// Fetch current odds snapshot.
 		entries, err := client.OddsSnapshot(fixture.FixtureID)
 		if err != nil {
 			log.Printf("odds fetch error (fixture %d): %v", fixture.FixtureID, err)
@@ -194,27 +207,28 @@ func poll(
 		}
 
 		for _, sig := range signals {
-			// Persist signal.
+			// 1. Persist to signals.jsonl.
 			if err := persist.Append(sig); err != nil {
 				log.Printf("persist error: %v", err)
 			}
 
-			// Print signal.
+			// 2. Print signal to terminal.
 			printSignal(sig)
 
-			// AI interpretation.
+			// 3. AI interpretation (if enabled).
 			if interpreter != nil {
 				log.Println("Requesting AI interpretation...")
 				commentary := interpreter.Interpret(sig)
 				fmt.Printf("  AI Analysis: %s\n\n", commentary)
 			}
 
-			// Send to arena agents.
+			// 4. Route to arena agents.
 			engine.Process(sig)
 		}
 	}
 }
 
+// printSignal formats and prints a single signal to the terminal.
 func printSignal(sig detector.Signal) {
 	fmt.Printf("\n[%s SIGNAL] %s vs %s\n", sig.Severity, sig.HomeTeam, sig.AwayTeam)
 	fmt.Printf("  Market:     %s\n", sig.MarketName)
@@ -227,6 +241,7 @@ func printSignal(sig detector.Signal) {
 	fmt.Printf("  DetectedAt: %s\n", sig.DetectedAt.Format(time.RFC3339))
 }
 
+// printSummary prints a final signal accuracy table on shutdown.
 func printSummary(filePath string) {
 	signals, err := store.LoadAll(filePath)
 	if err != nil || len(signals) == 0 {
