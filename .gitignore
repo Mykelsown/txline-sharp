@@ -1,0 +1,14 @@
+# Sensitive
+setup/credentials.json
+setup/.env
+agent/.env
+agent/signals.jsonl
+agent/arena_results.json
+
+# Build artifacts
+agent/txline-sharp
+setup/node_modules/
+setup/dist/
+
+# Solana
+*.json.tmp
