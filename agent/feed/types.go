@@ -67,8 +67,8 @@ type ScoreEntry struct {
 	Period    int            `json:"Period"`
 	StatusID  int            `json:"StatusId"`
 	Seq       int64          `json:"Seq"`
-	Timestamp string         `json:"Ts"`
-	GameState int            `json:"GameState"`
+	Timestamp int64         `json:"Ts"`
+	GameState string         `json:"GameState"` // API returns string e.g. "1" not int
 	Stats     map[string]int `json:"Stats"`
 }
 
