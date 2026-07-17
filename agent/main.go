@@ -9,6 +9,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Mykelsown/txline-sharp/arena"
 	"github.com/Mykelsown/txline-sharp/config"
 	"github.com/Mykelsown/txline-sharp/detector"
 	"github.com/Mykelsown/txline-sharp/feed"
@@ -17,8 +18,8 @@ import (
 
 func main() {
 	log.SetFlags(log.Ltime | log.Lshortfile)
-	log.Println("TxLINE Sharp Movement Detector")
-	log.Println("================================")
+	log.Println("TxLINE Sharp Movement Detector + Arena")
+	log.Println("=======================================")
 
 	credPath := "../setup/credentials.json"
 	if v := os.Getenv("CREDENTIALS_FILE"); v != "" {
@@ -35,6 +36,15 @@ func main() {
 	log.Printf("Poll Interval:      %ds", cfg.PollIntervalSec)
 	log.Printf("Movement Threshold: %.0f%%", cfg.MovementThreshold*100)
 	log.Printf("Signals File:       %s", cfg.SignalsFile)
+	log.Printf("Arena Results:      %s", cfg.ArenaResultsFile)
+
+	// AI interpreter (optional, requires ANTHROPIC_API_KEY env var).
+	interpreter := arena.NewInterpreter()
+	if interpreter != nil {
+		log.Println("AI Interpreter:     enabled")
+	} else {
+		log.Println("AI Interpreter:     disabled (set ANTHROPIC_API_KEY to enable)")
+	}
 	log.Println()
 
 	// Initialize core components.
@@ -42,15 +52,15 @@ func main() {
 	memory  := store.NewMemory()
 	detect  := detector.New(cfg.MovementThreshold)
 	tracker := store.NewOutcomeTracker(cfg.SignalsFile)
+	engine  := arena.NewEngine(cfg.ArenaResultsFile)
 
-	// Open persist layer (creates signals.jsonl if it doesn't exist).
+	// Open persist layer.
 	persist, err := store.NewPersist(cfg.SignalsFile)
 	if err != nil {
 		log.Fatalf("persist: %v", err)
 	}
 	defer persist.Close()
 
-	// Load any signals from a previous run so we don't lose history.
 	existing, err := store.LoadAll(cfg.SignalsFile)
 	if err != nil {
 		log.Fatalf("load existing signals: %v", err)
@@ -94,49 +104,66 @@ func main() {
 
 	log.Printf("Agent running. Polling every %ds. Press Ctrl+C to stop.", cfg.PollIntervalSec)
 
-	// Run one poll immediately.
-	poll(client, memory, detect, persist, tracker, fixtures)
+	poll(client, memory, detect, persist, tracker, engine, interpreter, fixtures)
 
 	for {
 		select {
 		case <-ctx.Done():
 			log.Println("Shutdown signal received. Stopping agent.")
+			engine.PrintSummary()
+			if err := engine.Save(); err != nil {
+				log.Printf("arena save error: %v", err)
+			}
 			printSummary(cfg.SignalsFile)
 			return
 		case <-ticker.C:
-			poll(client, memory, detect, persist, tracker, fixtures)
+			poll(client, memory, detect, persist, tracker, engine, interpreter, fixtures)
 		}
 	}
 }
 
-// poll fetches fresh odds and scores for every tracked fixture,
-// runs the detector, persists any new signals, and resolves finished matches.
 func poll(
-	client   *feed.Client,
-	memory   *store.Memory,
-	detect   *detector.Detector,
-	persist  *store.Persist,
-	tracker  *store.OutcomeTracker,
-	fixtures []feed.Fixture,
+	client      *feed.Client,
+	memory      *store.Memory,
+	detect      *detector.Detector,
+	persist     *store.Persist,
+	tracker     *store.OutcomeTracker,
+	engine      *arena.Engine,
+	interpreter *arena.Interpreter,
+	fixtures    []feed.Fixture,
 ) {
 	for _, fixture := range fixtures {
-		// Check scores first to detect finished matches.
+		// Check scores and resolve finished matches.
 		scores, err := client.ScoresSnapshot(fixture.FixtureID)
 		if err != nil {
 			log.Printf("scores fetch error (fixture %d): %v", fixture.FixtureID, err)
 		}
 
-		// If the match just finished, resolve all its signals.
 		for _, score := range scores {
 			if score.IsFinished() {
-				if err := tracker.Resolve(fixture, score); err != nil {
-					log.Printf("outcome resolve error (fixture %d): %v", fixture.FixtureID, err)
+				homeScore := score.Stats["home_score"]
+				awayScore := score.Stats["away_score"]
+				finalScore := fmt.Sprintf("%s %d - %d %s",
+					fixture.HomeTeam(), homeScore, awayScore, fixture.AwayTeam())
+
+				result := "DRAW"
+				if homeScore > awayScore {
+					result = "HOME_WIN"
+				} else if awayScore > homeScore {
+					result = "AWAY_WIN"
 				}
+
+				if err := tracker.Resolve(fixture, score); err != nil {
+					log.Printf("outcome resolve error: %v", err)
+				}
+
+				engine.Settle(fixture.FixtureID, result,
+					fixture.HomeTeam(), fixture.AwayTeam(), finalScore)
 				break
 			}
 		}
 
-		// Fetch odds snapshot.
+		// Fetch odds.
 		entries, err := client.OddsSnapshot(fixture.FixtureID)
 		if err != nil {
 			log.Printf("odds fetch error (fixture %d): %v", fixture.FixtureID, err)
@@ -160,7 +187,6 @@ func poll(
 		}
 
 		signals := detect.Diff(fixture, prev, curr)
-
 		if len(signals) == 0 {
 			log.Printf("fixture %d (%s vs %s): %d outcomes checked, no movement",
 				fixture.FixtureID, fixture.HomeTeam(), fixture.AwayTeam(), len(curr))
@@ -168,18 +194,27 @@ func poll(
 		}
 
 		for _, sig := range signals {
-			// Persist to signals.jsonl.
+			// Persist signal.
 			if err := persist.Append(sig); err != nil {
 				log.Printf("persist error: %v", err)
 			}
 
-			// Print to terminal.
+			// Print signal.
 			printSignal(sig)
+
+			// AI interpretation.
+			if interpreter != nil {
+				log.Println("Requesting AI interpretation...")
+				commentary := interpreter.Interpret(sig)
+				fmt.Printf("  AI Analysis: %s\n\n", commentary)
+			}
+
+			// Send to arena agents.
+			engine.Process(sig)
 		}
 	}
 }
 
-// printSignal formats a signal for terminal output.
 func printSignal(sig detector.Signal) {
 	fmt.Printf("\n[%s SIGNAL] %s vs %s\n", sig.Severity, sig.HomeTeam, sig.AwayTeam)
 	fmt.Printf("  Market:     %s\n", sig.MarketName)
@@ -189,10 +224,9 @@ func printSignal(sig detector.Signal) {
 	fmt.Printf("  Prob:       %.1f%% -> %.1f%% (delta: +%.1f%%)\n",
 		sig.ProbBefore*100, sig.ProbAfter*100, sig.ProbDelta*100)
 	fmt.Printf("  BlockHash:  %s\n", sig.BlockHash)
-	fmt.Printf("  DetectedAt: %s\n\n", sig.DetectedAt.Format(time.RFC3339))
+	fmt.Printf("  DetectedAt: %s\n", sig.DetectedAt.Format(time.RFC3339))
 }
 
-// printSummary prints a final summary of all signals on shutdown.
 func printSummary(filePath string) {
 	signals, err := store.LoadAll(filePath)
 	if err != nil || len(signals) == 0 {
@@ -210,7 +244,7 @@ func printSummary(filePath string) {
 		}
 	}
 
-	fmt.Println("\n========== SESSION SUMMARY ==========")
+	fmt.Println("\n========== SIGNAL SUMMARY ==========")
 	fmt.Printf("Total signals logged: %d\n", total)
 	fmt.Printf("Resolved:             %d\n", resolved)
 	if resolved > 0 {
