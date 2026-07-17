@@ -34,13 +34,30 @@ func main() {
 	log.Printf("Service Level:      %d", cfg.Creds.ServiceLevel)
 	log.Printf("Poll Interval:      %ds", cfg.PollIntervalSec)
 	log.Printf("Movement Threshold: %.0f%%", cfg.MovementThreshold*100)
+	log.Printf("Signals File:       %s", cfg.SignalsFile)
 	log.Println()
 
+	// Initialize core components.
 	client  := feed.NewClient(cfg.Creds.JWT, cfg.Creds.APIToken)
 	memory  := store.NewMemory()
 	detect  := detector.New(cfg.MovementThreshold)
+	tracker := store.NewOutcomeTracker(cfg.SignalsFile)
 
-	// Fetch football fixtures once at startup.
+	// Open persist layer (creates signals.jsonl if it doesn't exist).
+	persist, err := store.NewPersist(cfg.SignalsFile)
+	if err != nil {
+		log.Fatalf("persist: %v", err)
+	}
+	defer persist.Close()
+
+	// Load any signals from a previous run so we don't lose history.
+	existing, err := store.LoadAll(cfg.SignalsFile)
+	if err != nil {
+		log.Fatalf("load existing signals: %v", err)
+	}
+	log.Printf("Loaded %d existing signal(s) from previous runs.", len(existing))
+
+	// Fetch football fixtures.
 	log.Println("Fetching World Cup fixtures...")
 	allFixtures, err := client.Fixtures()
 	if err != nil {
@@ -68,37 +85,58 @@ func main() {
 	}
 	fmt.Println()
 
-	// Graceful shutdown on SIGINT / SIGTERM.
+	// Graceful shutdown.
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
 	ticker := time.NewTicker(time.Duration(cfg.PollIntervalSec) * time.Second)
 	defer ticker.Stop()
 
-	log.Printf("Agent running. Polling every %ds. Press Ctrl+C to stop.\n", cfg.PollIntervalSec)
+	log.Printf("Agent running. Polling every %ds. Press Ctrl+C to stop.", cfg.PollIntervalSec)
 
-	// Run one poll immediately before waiting for the ticker.
-	poll(client, memory, detect, fixtures)
+	// Run one poll immediately.
+	poll(client, memory, detect, persist, tracker, fixtures)
 
 	for {
 		select {
 		case <-ctx.Done():
 			log.Println("Shutdown signal received. Stopping agent.")
+			printSummary(cfg.SignalsFile)
 			return
 		case <-ticker.C:
-			poll(client, memory, detect, fixtures)
+			poll(client, memory, detect, persist, tracker, fixtures)
 		}
 	}
 }
 
-// poll fetches fresh odds for every tracked fixture and runs the detector.
+// poll fetches fresh odds and scores for every tracked fixture,
+// runs the detector, persists any new signals, and resolves finished matches.
 func poll(
-	client  *feed.Client,
-	memory  *store.Memory,
-	detect  *detector.Detector,
+	client   *feed.Client,
+	memory   *store.Memory,
+	detect   *detector.Detector,
+	persist  *store.Persist,
+	tracker  *store.OutcomeTracker,
 	fixtures []feed.Fixture,
 ) {
 	for _, fixture := range fixtures {
+		// Check scores first to detect finished matches.
+		scores, err := client.ScoresSnapshot(fixture.FixtureID)
+		if err != nil {
+			log.Printf("scores fetch error (fixture %d): %v", fixture.FixtureID, err)
+		}
+
+		// If the match just finished, resolve all its signals.
+		for _, score := range scores {
+			if score.IsFinished() {
+				if err := tracker.Resolve(fixture, score); err != nil {
+					log.Printf("outcome resolve error (fixture %d): %v", fixture.FixtureID, err)
+				}
+				break
+			}
+		}
+
+		// Fetch odds snapshot.
 		entries, err := client.OddsSnapshot(fixture.FixtureID)
 		if err != nil {
 			log.Printf("odds fetch error (fixture %d): %v", fixture.FixtureID, err)
@@ -112,7 +150,6 @@ func poll(
 		}
 
 		curr := store.BuildSnapshot(entries)
-
 		prev, hasPrev := memory.Get(fixture.FixtureID)
 		memory.Set(fixture.FixtureID, curr)
 
@@ -130,17 +167,55 @@ func poll(
 			continue
 		}
 
-		// Print signals to terminal (persist layer comes in Phase 4).
 		for _, sig := range signals {
-			fmt.Printf("\n[SIGNAL] %s | %s vs %s\n", sig.Severity, sig.HomeTeam, sig.AwayTeam)
-			fmt.Printf("  Market:    %s\n", sig.MarketName)
-			fmt.Printf("  Outcome:   %s\n", sig.OutcomeName)
-			fmt.Printf("  Direction: %s\n", sig.Direction)
-			fmt.Printf("  Price:     %.3f -> %.3f\n", sig.PriceBefore, sig.PriceAfter)
-			fmt.Printf("  Prob:      %.1f%% -> %.1f%% (delta: %.1f%%)\n",
-				sig.ProbBefore*100, sig.ProbAfter*100, sig.ProbDelta*100)
-			fmt.Printf("  BlockHash: %s\n", sig.BlockHash)
-			fmt.Printf("  DetectedAt: %s\n\n", sig.DetectedAt.Format(time.RFC3339))
+			// Persist to signals.jsonl.
+			if err := persist.Append(sig); err != nil {
+				log.Printf("persist error: %v", err)
+			}
+
+			// Print to terminal.
+			printSignal(sig)
 		}
 	}
+}
+
+// printSignal formats a signal for terminal output.
+func printSignal(sig detector.Signal) {
+	fmt.Printf("\n[%s SIGNAL] %s vs %s\n", sig.Severity, sig.HomeTeam, sig.AwayTeam)
+	fmt.Printf("  Market:     %s\n", sig.MarketName)
+	fmt.Printf("  Outcome:    %s\n", sig.OutcomeName)
+	fmt.Printf("  Direction:  %s\n", sig.Direction)
+	fmt.Printf("  Price:      %.3f -> %.3f\n", sig.PriceBefore, sig.PriceAfter)
+	fmt.Printf("  Prob:       %.1f%% -> %.1f%% (delta: +%.1f%%)\n",
+		sig.ProbBefore*100, sig.ProbAfter*100, sig.ProbDelta*100)
+	fmt.Printf("  BlockHash:  %s\n", sig.BlockHash)
+	fmt.Printf("  DetectedAt: %s\n\n", sig.DetectedAt.Format(time.RFC3339))
+}
+
+// printSummary prints a final summary of all signals on shutdown.
+func printSummary(filePath string) {
+	signals, err := store.LoadAll(filePath)
+	if err != nil || len(signals) == 0 {
+		log.Println("No signals logged this session.")
+		return
+	}
+
+	total, resolved, correct := len(signals), 0, 0
+	for _, s := range signals {
+		if s.Resolved {
+			resolved++
+			if s.PredictionCorrect != nil && *s.PredictionCorrect {
+				correct++
+			}
+		}
+	}
+
+	fmt.Println("\n========== SESSION SUMMARY ==========")
+	fmt.Printf("Total signals logged: %d\n", total)
+	fmt.Printf("Resolved:             %d\n", resolved)
+	if resolved > 0 {
+		fmt.Printf("Correct predictions:  %d / %d (%.0f%%)\n",
+			correct, resolved, float64(correct)/float64(resolved)*100)
+	}
+	fmt.Println("=====================================")
 }
