@@ -249,10 +249,16 @@ func poll(
 			if interpreter != nil {
 				log.Println("Requesting AI interpretation...")
 				commentary := interpreter.Interpret(sig)
+				sig.AIAnalysis = commentary
 				fmt.Printf("  AI Analysis: %s\n\n", commentary)
 			}
 
 			engine.Process(sig)
+		}
+
+		// Save arena results after every poll so the frontend stays current.
+		if err := engine.Save(); err != nil {
+			log.Printf("arena save error: %v", err)
 		}
 
 		// Update shared state with latest signal count.
