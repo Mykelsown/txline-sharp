@@ -162,8 +162,7 @@ func (s *Server) handleSignals(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if signals == nil {
-		signals = []interface{}{}
-		writeJSON(w, signals)
+		writeJSON(w, []struct{}{})
 		return
 	}
 
