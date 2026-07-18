@@ -41,9 +41,9 @@ type Decision struct {
 
 // SignalID builds a unique string ID for a signal.
 func SignalID(sig detector.Signal) string {
-	return fmt.Sprintf("%d_%d_%s",
+	return fmt.Sprintf("%d_%s_%s",
 		sig.FixtureID,
-		sig.OutcomeID,
+		sig.OutcomeKey,
 		sig.DetectedAt.Format("20060102T150405"),
 	)
 }

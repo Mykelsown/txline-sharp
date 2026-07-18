@@ -6,17 +6,13 @@ import (
 	"github.com/Mykelsown/txline-sharp/feed"
 )
 
-// FixtureSnapshot holds the most recent odds snapshot for one fixture.
-type FixtureSnapshot struct {
-	FixtureID int64
-	Odds      feed.OddsSnapshot // outcomeID -> OddsEntry
-}
+// OddsSnapshot is a map of OutcomeKey -> OddsEntry for one fixture.
+type OddsSnapshot = feed.OddsSnapshot
 
 // Memory holds the last known odds snapshot for every tracked fixture.
-// It is safe for concurrent use by the poller and detector goroutines.
 type Memory struct {
 	mu        sync.RWMutex
-	snapshots map[int64]feed.OddsSnapshot // fixtureID -> snapshot
+	snapshots map[int64]feed.OddsSnapshot
 }
 
 // NewMemory constructs an empty Memory store.
@@ -34,19 +30,19 @@ func (m *Memory) Get(fixtureID int64) (feed.OddsSnapshot, bool) {
 	return snap, ok
 }
 
-// Set stores the latest odds snapshot for a fixture, replacing any previous one.
+// Set stores the latest odds snapshot for a fixture.
 func (m *Memory) Set(fixtureID int64, snap feed.OddsSnapshot) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.snapshots[fixtureID] = snap
 }
 
-// BuildSnapshot converts a flat slice of OddsEntry (from the API) into an
-// OddsSnapshot map keyed by OutcomeID for O(1) diff lookups.
+// BuildSnapshot converts a flat slice of OddsEntry into an OddsSnapshot
+// map keyed by OutcomeKey for O(1) diff lookups.
 func BuildSnapshot(entries []feed.OddsEntry) feed.OddsSnapshot {
 	snap := make(feed.OddsSnapshot, len(entries))
 	for _, e := range entries {
-		snap[e.OutcomeID] = e
+		snap[e.OutcomeKey] = e
 	}
 	return snap
 }

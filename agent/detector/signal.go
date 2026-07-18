@@ -19,14 +19,15 @@ type Signal struct {
 	AwayTeam    string `json:"away_team"`
 	MarketName  string `json:"market_name"`
 	OutcomeName string `json:"outcome_name"`
-	OutcomeID   int64  `json:"outcome_id"`
+	OutcomeKey  string `json:"outcome_key"` // stable key: SuperOddsType|period|params|priceName
+	InRunning   bool   `json:"in_running"`
 
 	// Odds movement
 	PriceBefore float64 `json:"price_before"`
 	PriceAfter  float64 `json:"price_after"`
-	ProbBefore  float64 `json:"prob_before"`  // implied probability before
-	ProbAfter   float64 `json:"prob_after"`   // implied probability after
-	ProbDelta   float64 `json:"prob_delta"`   // absolute shift (positive = shortening)
+	ProbBefore  float64 `json:"prob_before"`
+	ProbAfter   float64 `json:"prob_after"`
+	ProbDelta   float64 `json:"prob_delta"`
 
 	// Classification
 	Severity  Severity `json:"severity"`
@@ -34,19 +35,16 @@ type Signal struct {
 
 	// Timing and on-chain anchor
 	DetectedAt time.Time `json:"detected_at"`
-	BlockHash  string    `json:"block_hash"` // cryptographic anchor from TxLINE
+	BlockHash  string    `json:"block_hash"`
 
-	// Outcome tracking (filled in after match ends)
-	Resolved        bool   `json:"resolved"`
-	PredictionCorrect *bool `json:"prediction_correct,omitempty"`
-	FinalScore      string `json:"final_score,omitempty"`
+	// Outcome tracking (filled after match ends)
+	Resolved          bool    `json:"resolved"`
+	PredictionCorrect *bool   `json:"prediction_correct,omitempty"`
+	FinalScore        string  `json:"final_score,omitempty"`
+	AIAnalysis        string  `json:"ai_analysis,omitempty"`
 }
 
-// classifySeverity assigns a severity based on the absolute probability delta.
-//   < 4%  : should not reach here (filtered by threshold)
-//   4-7%  : LOW
-//   7-12% : MEDIUM
-//   > 12% : HIGH
+// classifySeverity assigns severity based on absolute probability delta.
 func classifySeverity(delta float64) Severity {
 	switch {
 	case delta >= 0.12:

@@ -110,17 +110,28 @@ func (c *Client) Fixtures() ([]Fixture, error) {
 	return fixtures, nil
 }
 
-// OddsSnapshot fetches the current odds for a single fixture.
+// OddsSnapshot fetches current odds for a single fixture and returns
+// flattened OddsEntry records, one per outcome per market.
 func (c *Client) OddsSnapshot(fixtureID int64) ([]OddsEntry, error) {
 	data, err := c.get(fmt.Sprintf("/odds/snapshot/%d", fixtureID))
 	if err != nil {
 		return nil, fmt.Errorf("odds snapshot %d: %w", fixtureID, err)
 	}
-	var entries []OddsEntry
-	if err := json.Unmarshal(data, &entries); err != nil {
-		return nil, fmt.Errorf("odds snapshot decode: %w", err)
+
+	// The API wraps the array in {"value": [...], "Count": N}
+	var wrapper struct {
+		Value []OddsRecord `json:"value"`
 	}
-	return entries, nil
+	if err := json.Unmarshal(data, &wrapper); err != nil {
+		// Try direct array decode as fallback
+		var records []OddsRecord
+		if err2 := json.Unmarshal(data, &records); err2 != nil {
+			return nil, fmt.Errorf("odds snapshot decode: %w", err)
+		}
+		return FlattenOddsRecords(records), nil
+	}
+
+	return FlattenOddsRecords(wrapper.Value), nil
 }
 
 // ScoresSnapshot fetches the latest score state for a single fixture.

@@ -10,7 +10,7 @@ import (
 // Detector diffs consecutive odds snapshots and emits Signals when a
 // significant implied-probability shift is detected.
 type Detector struct {
-	threshold float64 // minimum absolute prob delta to trigger (e.g. 0.04)
+	threshold float64
 }
 
 // New constructs a Detector with the given movement threshold.
@@ -20,10 +20,6 @@ func New(threshold float64) *Detector {
 
 // Diff compares a previous odds snapshot against a new one for a single fixture
 // and returns all Signals whose implied-probability shift exceeds the threshold.
-//
-// fixture provides match context (team names) for the signal.
-// prev is the stored snapshot from the last poll cycle.
-// curr is the freshly fetched snapshot.
 func (d *Detector) Diff(
 	fixture feed.Fixture,
 	prev feed.OddsSnapshot,
@@ -32,10 +28,9 @@ func (d *Detector) Diff(
 	var signals []Signal
 	now := time.Now().UTC()
 
-	for outcomeID, newEntry := range curr {
-		oldEntry, existed := prev[outcomeID]
+	for outcomeKey, newEntry := range curr {
+		oldEntry, existed := prev[outcomeKey]
 		if !existed {
-			// New outcome appeared in the market. Skip, no baseline to diff.
 			continue
 		}
 
@@ -62,7 +57,7 @@ func (d *Detector) Diff(
 			AwayTeam:    fixture.AwayTeam(),
 			MarketName:  newEntry.MarketName,
 			OutcomeName: newEntry.OutcomeName,
-			OutcomeID:   outcomeID,
+			OutcomeKey:  outcomeKey,
 			PriceBefore: oldEntry.Price,
 			PriceAfter:  newEntry.Price,
 			ProbBefore:  probBefore,
@@ -72,6 +67,7 @@ func (d *Detector) Diff(
 			Direction:   direction,
 			DetectedAt:  now,
 			BlockHash:   newEntry.BlockHash,
+			InRunning:   newEntry.InRunning,
 			Resolved:    false,
 		}
 
