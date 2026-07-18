@@ -1,5 +1,5 @@
 # Sensitive
-setup/credentials.json
+# setup/credentials.json
 setup/.env
 agent/.env
 agent/signals.jsonl
