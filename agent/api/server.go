@@ -30,6 +30,13 @@ type AgentState struct {
 	Fixtures            []feed.Fixture
 }
 
+// SetRunning updates the IsRunning flag safely.
+func (s *AgentState) SetRunning(running bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.IsRunning = running
+}
+
 // Update sets the last poll time and signal count atomically.
 func (s *AgentState) Update(totalSignals int) {
 	s.mu.Lock()
