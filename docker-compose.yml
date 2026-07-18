@@ -1,0 +1,51 @@
+version: "3.9"
+
+services:
+  agent:
+    build:
+      context: ./agent
+      dockerfile: Dockerfile
+    container_name: txline-agent
+    restart: unless-stopped
+    ports:
+      - "8081:8081"
+    environment:
+      - API_ADDR=:8081
+      - CREDENTIALS_FILE=/secrets/credentials.json
+      - SIGNALS_FILE=/data/signals.jsonl
+      - ARENA_RESULTS_FILE=/data/arena_results.json
+    env_file:
+      # Contains ANTHROPIC_API_KEY, POLL_INTERVAL_SEC, MOVEMENT_THRESHOLD
+      - ./agent/.env
+    volumes:
+      # credentials.json mounted read-only (never baked into image)
+      - ./setup/credentials.json:/secrets/credentials.json:ro
+      # Persistent data directory for signals and arena results
+      - txline-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8081/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  frontend:
+    build:
+      context: ./txline-frontend
+      dockerfile: Dockerfile
+    container_name: txline-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    depends_on:
+      agent:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:80"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  txline-data:
+    driver: local

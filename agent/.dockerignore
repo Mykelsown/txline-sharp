@@ -1,0 +1,13 @@
+# Secrets - never bake into image
+.env
+credentials.json
+signals.jsonl
+arena_results.json
+
+# Dev artifacts
+*.tmp
+*.log
+
+# Git
+.git
+.gitignore
