@@ -11,6 +11,7 @@ import (
 
 	"github.com/joho/godotenv"
 
+	"github.com/Mykelsown/txline-sharp/api"
 	"github.com/Mykelsown/txline-sharp/arena"
 	"github.com/Mykelsown/txline-sharp/config"
 	"github.com/Mykelsown/txline-sharp/detector"
@@ -21,8 +22,7 @@ import (
 func main() {
 	log.SetFlags(log.Ltime | log.Lshortfile)
 
-	// Load .env file if it exists. Silently ignored if not found,
-	// so environment variables set externally still work.
+	// Load .env file if present.
 	if err := godotenv.Load(); err == nil {
 		log.Println("Loaded .env file")
 	}
@@ -40,21 +40,33 @@ func main() {
 		log.Fatalf("config: %v", err)
 	}
 
+	// AI interpreter.
+	interpreter := arena.NewInterpreter()
+	aiEnabled := interpreter != nil
+
 	log.Printf("Wallet:             %s", cfg.Creds.WalletAddress)
 	log.Printf("Service Level:      %d", cfg.Creds.ServiceLevel)
 	log.Printf("Poll Interval:      %ds", cfg.PollIntervalSec)
 	log.Printf("Movement Threshold: %.0f%%", cfg.MovementThreshold*100)
 	log.Printf("Signals File:       %s", cfg.SignalsFile)
 	log.Printf("Arena Results:      %s", cfg.ArenaResultsFile)
-
-	// AI interpreter (optional, requires ANTHROPIC_API_KEY in .env or environment).
-	interpreter := arena.NewInterpreter()
-	if interpreter != nil {
+	if aiEnabled {
 		log.Println("AI Interpreter:     enabled")
 	} else {
 		log.Println("AI Interpreter:     disabled (set ANTHROPIC_API_KEY in .env to enable)")
 	}
 	log.Println()
+
+	// Initialize shared agent state (read by the HTTP API handlers).
+	state := &api.AgentState{
+		WalletAddress:        cfg.Creds.WalletAddress,
+		ServiceLevel:         cfg.Creds.ServiceLevel,
+		ActivatedAt:          cfg.Creds.ActivatedAt,
+		PollIntervalSec:      cfg.PollIntervalSec,
+		MovementThreshold:    cfg.MovementThreshold,
+		IsRunning:            true,
+		AIInterpreterEnabled: aiEnabled,
+	}
 
 	// Initialize core components.
 	client  := feed.NewClient(cfg.Creds.JWT, cfg.Creds.APIToken)
@@ -63,21 +75,22 @@ func main() {
 	tracker := store.NewOutcomeTracker(cfg.SignalsFile)
 	engine  := arena.NewEngine(cfg.ArenaResultsFile)
 
-	// Open persist layer (creates signals.jsonl if it doesn't exist).
+	// Open persist layer.
 	persist, err := store.NewPersist(cfg.SignalsFile)
 	if err != nil {
 		log.Fatalf("persist: %v", err)
 	}
 	defer persist.Close()
 
-	// Load any signals logged in previous runs.
+	// Load existing signals.
 	existing, err := store.LoadAll(cfg.SignalsFile)
 	if err != nil {
 		log.Fatalf("load existing signals: %v", err)
 	}
+	state.Update(len(existing))
 	log.Printf("Loaded %d existing signal(s) from previous runs.", len(existing))
 
-	// Fetch football fixtures once at startup.
+	// Fetch football fixtures.
 	log.Println("Fetching World Cup fixtures...")
 	allFixtures, err := client.Fixtures()
 	if err != nil {
@@ -95,6 +108,8 @@ func main() {
 		log.Fatal("No World Cup football fixtures found in bundle.")
 	}
 
+	state.SetFixtures(fixtures)
+
 	fmt.Printf("\nTracking %d World Cup fixture(s):\n", len(fixtures))
 	for _, f := range fixtures {
 		fmt.Printf("  - %s vs %s (ID: %d, Kickoff: %s)\n",
@@ -105,7 +120,27 @@ func main() {
 	}
 	fmt.Println()
 
-	// Graceful shutdown on SIGINT / SIGTERM.
+	// Start HTTP API server in background.
+	apiAddr := os.Getenv("API_ADDR")
+	if apiAddr == "" {
+		apiAddr = ":8081"
+	}
+	srv := api.NewServer(state, cfg.SignalsFile, cfg.ArenaResultsFile)
+	apiErrCh := make(chan error, 1)
+	go func() {
+		if err := srv.Start(apiAddr); err != nil {
+			apiErrCh <- err
+		}
+	}()
+	// Give the server 500ms to start and surface any bind errors.
+	select {
+	case err := <-apiErrCh:
+		log.Fatalf("[API] failed to start: %v", err)
+	case <-time.After(500 * time.Millisecond):
+		log.Printf("[API] server listening on http://localhost%s", apiAddr)
+	}
+
+	// Graceful shutdown.
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
@@ -114,13 +149,14 @@ func main() {
 
 	log.Printf("Agent running. Polling every %ds. Press Ctrl+C to stop.", cfg.PollIntervalSec)
 
-	// Run one poll immediately before waiting for the ticker.
-	poll(client, memory, detect, persist, tracker, engine, interpreter, fixtures)
+	// First poll immediately.
+	poll(client, memory, detect, persist, tracker, engine, interpreter, fixtures, state, cfg.SignalsFile)
 
 	for {
 		select {
 		case <-ctx.Done():
 			log.Println("Shutdown signal received. Stopping agent.")
+			state.SetRunning(false)
 			engine.PrintSummary()
 			if err := engine.Save(); err != nil {
 				log.Printf("arena save error: %v", err)
@@ -128,14 +164,11 @@ func main() {
 			printSummary(cfg.SignalsFile)
 			return
 		case <-ticker.C:
-			poll(client, memory, detect, persist, tracker, engine, interpreter, fixtures)
+			poll(client, memory, detect, persist, tracker, engine, interpreter, fixtures, state, cfg.SignalsFile)
 		}
 	}
 }
 
-// poll fetches fresh odds and scores for every tracked fixture,
-// runs the detector, persists signals, routes them to the arena,
-// and resolves finished matches.
 func poll(
 	client      *feed.Client,
 	memory      *store.Memory,
@@ -145,9 +178,10 @@ func poll(
 	engine      *arena.Engine,
 	interpreter *arena.Interpreter,
 	fixtures    []feed.Fixture,
+	state       *api.AgentState,
+	signalsFile string,
 ) {
 	for _, fixture := range fixtures {
-		// Check scores and resolve finished matches.
 		scores, err := client.ScoresSnapshot(fixture.FixtureID)
 		if err != nil {
 			log.Printf("scores fetch error (fixture %d): %v", fixture.FixtureID, err)
@@ -176,7 +210,6 @@ func poll(
 			}
 		}
 
-		// Fetch current odds snapshot.
 		entries, err := client.OddsSnapshot(fixture.FixtureID)
 		if err != nil {
 			log.Printf("odds fetch error (fixture %d): %v", fixture.FixtureID, err)
@@ -207,28 +240,27 @@ func poll(
 		}
 
 		for _, sig := range signals {
-			// 1. Persist to signals.jsonl.
 			if err := persist.Append(sig); err != nil {
 				log.Printf("persist error: %v", err)
 			}
 
-			// 2. Print signal to terminal.
 			printSignal(sig)
 
-			// 3. AI interpretation (if enabled).
 			if interpreter != nil {
 				log.Println("Requesting AI interpretation...")
 				commentary := interpreter.Interpret(sig)
 				fmt.Printf("  AI Analysis: %s\n\n", commentary)
 			}
 
-			// 4. Route to arena agents.
 			engine.Process(sig)
 		}
+
+		// Update shared state with latest signal count.
+		all, _ := store.LoadAll(signalsFile)
+		state.Update(len(all))
 	}
 }
 
-// printSignal formats and prints a single signal to the terminal.
 func printSignal(sig detector.Signal) {
 	fmt.Printf("\n[%s SIGNAL] %s vs %s\n", sig.Severity, sig.HomeTeam, sig.AwayTeam)
 	fmt.Printf("  Market:     %s\n", sig.MarketName)
@@ -241,7 +273,6 @@ func printSignal(sig detector.Signal) {
 	fmt.Printf("  DetectedAt: %s\n", sig.DetectedAt.Format(time.RFC3339))
 }
 
-// printSummary prints a final signal accuracy table on shutdown.
 func printSummary(filePath string) {
 	signals, err := store.LoadAll(filePath)
 	if err != nil || len(signals) == 0 {
