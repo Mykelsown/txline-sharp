@@ -4,6 +4,7 @@ setup/.env
 agent/.env
 agent/signals.jsonl
 agent/arena_results.json
+agent/signals.jsonl.tmp
 
 # Build artifacts
 agent/txline-sharp
