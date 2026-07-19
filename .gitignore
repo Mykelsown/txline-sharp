@@ -10,6 +10,7 @@ agent/signals.jsonl.tmp
 agent/txline-sharp
 setup/node_modules/
 setup/dist/
+setup/credentials.json
 
 # Solana
 *.json.tmp
