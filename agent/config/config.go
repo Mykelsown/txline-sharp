@@ -42,16 +42,23 @@ type Config struct {
 	DiscordWebhookURL string
 }
 
-// Load reads credentials from credentialsPath and applies env var overrides.
+// Load reads credentials from a file or from the CREDENTIALS_JSON env var.
 func Load(credentialsPath string) (*Config, error) {
-	absPath, err := filepath.Abs(credentialsPath)
-	if err != nil {
-		return nil, fmt.Errorf("resolve credentials path: %w", err)
-	}
+	var raw []byte
 
-	raw, err := os.ReadFile(absPath)
-	if err != nil {
-		return nil, fmt.Errorf("read credentials file %s: %w", absPath, err)
+	// Try env var first (used in cloud deployments like Railway)
+	if v := os.Getenv("CREDENTIALS_JSON"); v != "" {
+		raw = []byte(v)
+	} else {
+		absPath, err := filepath.Abs(credentialsPath)
+		if err != nil {
+			return nil, fmt.Errorf("resolve credentials path: %w", err)
+		}
+		data, err := os.ReadFile(absPath)
+		if err != nil {
+			return nil, fmt.Errorf("read credentials file %s: %w", absPath, err)
+		}
+		raw = data
 	}
 
 	var creds Credentials
@@ -60,7 +67,7 @@ func Load(credentialsPath string) (*Config, error) {
 	}
 
 	if creds.JWT == "" || creds.APIToken == "" {
-		return nil, fmt.Errorf("credentials file is missing jwt or apiToken")
+		return nil, fmt.Errorf("credentials missing jwt or apiToken")
 	}
 
 	cfg := &Config{
