@@ -13,3 +13,6 @@ setup/dist/
 
 # Solana
 *.json.tmp
+
+# frontend
+txline-frontend/node_modules
